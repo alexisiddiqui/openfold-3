@@ -12,6 +12,7 @@ on:
         required: false
         type: string
         default: ''
+  push:
   release:
     types: [published]
 
