@@ -139,7 +139,7 @@ class TestColabFoldQueryRunner:
 
     @staticmethod
     def _make_empty_template_file(path: Path):
-        """Create an empty pdb70.m8 file to simulate ColabFold returning empty template file."""
+        """Create an empty pdb70.m8 file to simulate ColabFold empty templates."""
         raw_main_dir = path / "raw" / "main"
         raw_main_dir.mkdir(parents=True, exist_ok=True)
         # Create an empty file (0 bytes)
@@ -333,10 +333,9 @@ class TestColabFoldQueryRunner:
         """Test that empty pdb70.m8 file is handled gracefully without crashing."""
         test_sequence = "TESTSEQUENCE"
         query = self._construct_monomer_query(test_sequence)
-        
-        # Create an empty pdb70.m8 file (0 bytes) to simulate ColabFold returning empty template file
+
         self._make_empty_template_file(tmp_path)
-        
+
         mapper = collect_colabfold_msa_data(query)
         runner = ColabFoldQueryRunner(
             colabfold_mapper=mapper,
@@ -345,19 +344,19 @@ class TestColabFoldQueryRunner:
             user_agent="test-agent",
             host_url="https://dummy.url",
         )
-        
+
         # Should not raise EmptyDataError or any other exception
         runner.query_format_main()
-        
+
         # Verify MSA processing still works
         expected_unpaired_dir = tmp_path / "main"
         assert expected_unpaired_dir.exists(), "Expected main MSA directory to exist"
-        
+
         expected_file = f"{get_sequence_hash(test_sequence)}.npz"
         assert (expected_unpaired_dir / expected_file).exists(), (
             f"Expected MSA file {expected_file} to exist"
         )
-        
+
         # Verify no template files are created (since m8 file is empty)
         template_alignments_dir = tmp_path / "template"
         if template_alignments_dir.exists():
@@ -366,7 +365,7 @@ class TestColabFoldQueryRunner:
             assert len(template_files) == 0, (
                 "Expected no template files to be created when m8 file is empty"
             )
-        
+
         # Test preprocess_colabfold_msas with empty template file
         msa_compute_settings = MsaComputationSettings(
             msa_file_format="npz",
@@ -376,25 +375,24 @@ class TestColabFoldQueryRunner:
             msa_output_directory=tmp_path,
             cleanup_msa_dir=False,
         )
-        
+
         # Call preprocess_colabfold_msas - should not raise any exception
         processed_query_set = preprocess_colabfold_msas(
-            inference_query_set=query,
-            compute_settings=msa_compute_settings
+            inference_query_set=query, compute_settings=msa_compute_settings
         )
-        
+
         # Verify that template fields are None/empty for all chains
         for query_name, query_obj in processed_query_set.queries.items():
             for chain in query_obj.chains:
                 assert chain.template_alignment_file_path is None, (
                     f"Expected template_alignment_file_path to be None for chain "
-                    f"{chain.chain_ids} of query {query_name} when template file is empty, "
-                    f"but got {chain.template_alignment_file_path}"
+                    f"{chain.chain_ids} of query {query_name} when template file "
+                    f"is empty, but got {chain.template_alignment_file_path}"
                 )
                 assert chain.template_entry_chain_ids is None, (
                     f"Expected template_entry_chain_ids to be None for chain "
-                    f"{chain.chain_ids} of query {query_name} when template file is empty, "
-                    f"but got {chain.template_entry_chain_ids}"
+                    f"{chain.chain_ids} of query {query_name} when template file"
+                    f"is empty, but got {chain.template_entry_chain_ids}"
                 )
 
 
