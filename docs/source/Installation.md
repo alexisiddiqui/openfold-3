@@ -38,21 +38,13 @@ mamba install kalign2 -c bioconda
 
 ### OpenFold3 Docker Image
 
-A compressed version of the OpenFold3 image is available on HuggingFace at this [link](https://huggingface.co/OpenFold/OpenFold3/tree/main/docker_image) The size of the compressed image is ~14GB.
+The OpenFold3 Docker Image is now available on Docker Hub: [openfoldconsortium/openfold3](https://hub.docker.com/repository/docker/openfoldconsortium/openfold3/general)
 
-To verify the compressed file is not unintentionally corrupted, you can check against the md5 checksum file provided with the following command and expected output.
-
-```bash
-$ md5sum -c openfold3_image.tar.bz2.md5
-openfold3_image.tar.bz2: OK
-```
-
-The image may then be unpacked with the following command:
+To get the latest stable version, you can use the following command
 
 ```bash
-docker load --input openfold3_image.tar.bz2
+docker pull openfoldconsortium/openfold3:stable
 ```
-
 
 ### Building the OpenFold3 Docker Image 
 
