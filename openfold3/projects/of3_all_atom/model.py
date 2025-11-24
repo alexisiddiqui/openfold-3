@@ -685,3 +685,158 @@ class OpenFold3(nn.Module):
             torch.cuda.empty_cache()
 
         return batch, output
+
+    def export_latents(
+        self, batch: dict, num_recycles: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Export internal latents before the diffusion head.
+        Useful for neural style transfer and latent manipulation.
+
+        Args:
+            batch:
+                Input feature dictionary (same as forward())
+            num_recycles:
+                Number of recycles to run. If None, uses default from config.
+
+        Returns:
+            si_input:
+                [*, N_token, C_s_input] Single (input) representation
+            si_trunk:
+                [*, N_token, C_s] Single representation output from model trunk
+            zij_trunk:
+                [*, N_token, N_token, C_z] Pair representation output from model trunk
+        """
+        inplace_safe = not (self.training or torch.is_grad_enabled())
+
+        if num_recycles is None:
+            num_recycles = self.shared.num_recycles
+        num_cycles = num_recycles + 1
+
+        with torch.no_grad():
+            si_input, si_trunk, zij_trunk = self.run_trunk(
+                batch=batch, num_cycles=num_cycles, inplace_safe=inplace_safe
+            )
+
+        return si_input, si_trunk, zij_trunk
+
+    def run_from_latents(
+        self,
+        batch: dict,
+        si_input: torch.Tensor,
+        si_trunk: torch.Tensor,
+        zij_trunk: torch.Tensor,
+        no_rollout_steps: int | None = None,
+        no_rollout_samples: int = 1,
+    ) -> dict:
+        """
+        Run diffusion and confidence modules from provided latent outputs.
+        Useful for neural style transfer where latents are manipulated externally.
+
+        Args:
+            batch:
+                Input feature dictionary
+            si_input:
+                [*, N_token, C_s_input] Single (input) representation
+            si_trunk:
+                [*, N_token, C_s] Single representation
+            zij_trunk:
+                [*, N_token, N_token, C_z] Pair representation
+            no_rollout_steps:
+                Number of diffusion steps. If None, uses full rollout steps from config.
+            no_rollout_samples:
+                Number of samples to generate (default: 1)
+
+        Returns:
+            Output dictionary containing:
+                "atom_positions_predicted" ([*, N_samples, N_atom, 3]):
+                    Predicted atom positions
+                "plddt_logits" ([*, N_atom, 50]):
+                    Predicted binned PLDDT logits
+                "pae_logits" ([*, N_token, N_token, 64]):
+                    Predicted binned PAE logits (if enabled)
+                "pde_logits" ([*, N_token, N_token, 64]):
+                    Predicted binned PDE logits
+                "experimentally_resolved_logits" ([*, N_atom, 2]):
+                    Predicted binned experimentally resolved logits
+                "distogram_logits" ([*, N_token, N_token, 64]):
+                    Predicted binned distogram logits
+        """
+        inplace_safe = not (self.training or torch.is_grad_enabled())
+        mode_mem_settings = self._get_mode_mem_settings()
+
+        offload_confidence_heads = self._do_inference_offload(
+            seq_len=batch["token_mask"].shape[-1],
+            module_name=OffloadModules.CONFIDENCE_HEADS.value,
+        )
+
+        if no_rollout_steps is None:
+            no_rollout_steps = self.shared.diffusion.no_full_rollout_steps
+
+        # Expand sampling dimension if needed
+        if si_input.dim() == 2 or (si_input.dim() == 3 and si_input.shape[1] != no_rollout_samples):
+            si_input = si_input.unsqueeze(1) if si_input.dim() == 2 else si_input
+            si_trunk = si_trunk.unsqueeze(1) if si_trunk.dim() == 2 else si_trunk
+            zij_trunk = zij_trunk.unsqueeze(1) if zij_trunk.dim() == 2 else zij_trunk
+
+        # Expand batch if needed
+        ref_space_uid_to_perm = batch.pop("ref_space_uid_to_perm", None)
+        if batch["token_mask"].dim() == 1 or (
+            batch["token_mask"].dim() == 2 and batch["token_mask"].shape[1] == 1
+        ):
+            batch = tensor_tree_map(lambda t: t.unsqueeze(1), batch)
+        batch["ref_space_uid_to_perm"] = ref_space_uid_to_perm
+
+        # Compute atom positions
+        with (
+            torch.no_grad(),
+            torch.amp.autocast(device_type="cuda", dtype=torch.float32),
+        ):
+            noise_schedule = create_noise_schedule(
+                no_rollout_steps=no_rollout_steps,
+                **self.config.architecture.noise_schedule,
+                dtype=si_input.dtype,
+                device=si_input.device,
+            )
+
+            atom_positions_predicted = self.sample_diffusion(
+                batch=batch,
+                si_input=si_input,
+                si_trunk=si_trunk,
+                zij_trunk=zij_trunk,
+                noise_schedule=noise_schedule,
+                no_rollout_samples=no_rollout_samples,
+                chunk_size=mode_mem_settings.chunk_size,
+                use_deepspeed_evo_attention=mode_mem_settings.use_deepspeed_evo_attention,
+                use_cueq_triangle_kernels=mode_mem_settings.use_cueq_triangle_kernels,
+                use_lma=mode_mem_settings.use_lma,
+                _mask_trans=True,
+            )
+
+            self.clear_autocast_cache()
+
+        output = {
+            "si_trunk": si_trunk,
+            "zij_trunk": zij_trunk,
+            "atom_positions_predicted": atom_positions_predicted,
+        }
+
+        cast_dtype = torch.float32 if self.training else si_trunk.dtype
+        with torch.amp.autocast(device_type="cuda", dtype=cast_dtype):
+            # Compute confidence logits
+            output.update(
+                self.aux_heads(
+                    batch=batch,
+                    si_input=si_input,
+                    output=output,
+                    chunk_size=mode_mem_settings.chunk_size,
+                    use_deepspeed_evo_attention=mode_mem_settings.use_deepspeed_evo_attention,
+                    use_cueq_triangle_kernels=mode_mem_settings.use_cueq_triangle_kernels,
+                    use_lma=mode_mem_settings.use_lma,
+                    inplace_safe=inplace_safe,
+                    offload_inference=offload_confidence_heads,
+                    _mask_trans=True,
+                )
+            )
+
+        return output
